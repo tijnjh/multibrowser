@@ -22,3 +22,8 @@ opt-level = 1
 
 [profile.dev.package."*"]
 opt-level = 3
+
+# xattr 0.2.3 (used by gpui via zed-async-tar) doesn't build on Linux with libc >= 0.2.190.
+# See patches/xattr-0.2.3/PATCHED.md.
+[patch.crates-io]
+xattr = { path = "patches/xattr-0.2.3" }
