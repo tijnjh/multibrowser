@@ -1,3 +1,6 @@
+# !! this is vibecoded !!
+
+
 # multibrowser
 
 A GPUI app that loads every page in four browser engines at once and shows them in a 2×2 grid:
