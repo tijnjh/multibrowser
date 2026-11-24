@@ -6,12 +6,19 @@ use engine::{Cmd, Engine, EngineKind, Key, PointerAction, Status};
 use gpui::{
     App, Application, Bounds, ClipboardItem, Context, FocusHandle, KeyDownEvent, MouseButton,
     MouseDownEvent, MouseMoveEvent, ObjectFit, Pixels, RenderImage, ScrollWheelEvent, SharedString, Window,
-    WindowBounds, WindowOptions, canvas, div, img, prelude::*, px, rgb, size,
+    WindowBounds, WindowOptions, canvas, div, img, point, prelude::*, px, rgb, size,
 };
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
+
+/// The toolbar doubles as the window's title bar: on macOS the traffic lights sit in it,
+/// centred. macOS positions them within its native title bar strip (28 px), so taller
+/// toolbars would push them partly outside it, where they get clipped.
+const TOOLBAR_HEIGHT: f32 = 40.0;
+/// Room for the traffic lights (they end at about 70 px) plus a gap before the buttons (macOS).
+const TRAFFIC_LIGHTS_WIDTH: f32 = 88.0;
 
 const DEFAULT_URL: &str = "https://en.wikipedia.org/wiki/Comparison_of_browser_engines";
 
@@ -338,12 +345,26 @@ impl MultiBrowser {
         } else {
             self.url_text.clone().into()
         };
+        // macOS hides the traffic lights in fullscreen, so only make room for them otherwise.
+        let traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
         div()
+            .id("toolbar")
             .flex()
+            .flex_none()
             .items_center()
             .gap_2()
+            .h(px(TOOLBAR_HEIGHT))
             .px_3()
-            .py_2()
+            .when(traffic_lights, |d| d.pl(px(TRAFFIC_LIGHTS_WIDTH)))
+            // Double-clicking empty space does what double-clicking a title bar does (zoom or
+            // minimize, per System Settings). Buttons and the URL field handle their own clicks.
+            .when(cfg!(target_os = "macos"), |d| {
+                d.on_click(|ev, window, _| {
+                    if ev.click_count() == 2 {
+                        window.titlebar_double_click();
+                    }
+                })
+            })
             .bg(rgb(0x181825))
             .border_b_1()
             .border_color(rgb(0x313244))
@@ -689,9 +710,11 @@ fn main() {
                     // Wayland app id / X11 WM_CLASS: matches multibrowser.desktop, so the
                     // desktop shows the app's icon for this window.
                     app_id: Some("multibrowser".into()),
+                    // macOS: no title bar; the traffic lights sit inline in the toolbar, centred.
                     titlebar: Some(gpui::TitlebarOptions {
                         title: Some("Multibrowser".into()),
-                        ..Default::default()
+                        appears_transparent: true,
+                        traffic_light_position: Some(point(px(16.), px((TOOLBAR_HEIGHT - 14.) / 2.))),
                     }),
                     ..Default::default()
                 },
