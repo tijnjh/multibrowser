@@ -1,0 +1,101 @@
+# Builds the macOS (Apple Silicon) and Linux (x86_64, arm64) packages.
+#
+# - Pushing a tag like v0.2.0 (scripts/release.sh does this) builds them and publishes a
+#   GitHub release with the packages attached. A tag with a suffix (v0.2.0-beta.1) is
+#   published as a prerelease.
+# - Running it by hand (Actions → Release → Run workflow) only builds; the packages are
+#   attached to the workflow run, which is a way to test a build before releasing.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS arm64
+            runner: macos-15
+          # Ubuntu 22.04 for an older glibc, so the binary runs on more distros.
+          - name: Linux x86_64
+            runner: ubuntu-22.04
+          - name: Linux arm64
+            runner: ubuntu-22.04-arm
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Check the tag matches Cargo.toml
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME doesn't match Cargo.toml version $version"
+            exit 1
+          fi
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-xcb-dev \
+            libxcb1-dev libfontconfig-dev libfreetype-dev libvulkan-dev libasound2-dev
+
+      - name: Make sure the Metal shader compiler is available
+        if: runner.os == 'macOS'
+        run: xcrun -f metal >/dev/null 2>&1 || xcodebuild -downloadComponent MetalToolchain
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build package
+        run: scripts/package.sh
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: package-${{ matrix.runner }}
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          pattern: package-*
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          version=${GITHUB_REF_NAME#v}
+          (cd dist && sha256sum -- * > SHA256SUMS.txt)
+          sed "s/__VERSION__/$version/g" packaging/release-notes.md > notes.md
+          prerelease=()
+          [[ $version == *-* ]] && prerelease=(--prerelease)
+          gh release create "$GITHUB_REF_NAME" dist/* \
+            --verify-tag \
+            --title "Multibrowser $version" \
+            --notes-file notes.md \
+            --generate-notes \
+            "${prerelease[@]}"

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Multibrowser
+GenericName=Browser engine comparison
+Comment=Load a page in Chromium, Firefox, WebKit and Ladybird side by side
+Exec=multibrowser %u
+Icon=multibrowser
+Terminal=false
+Categories=Development;WebDevelopment;
+Keywords=browser;engine;compare;chromium;firefox;webkit;ladybird;
+StartupWMClass=multibrowser
