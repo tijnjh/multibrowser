@@ -8,14 +8,14 @@ Applications. The app isn't notarized, so the first time you open it macOS says 
 xattr -dr com.apple.quarantine /Applications/Multibrowser.app
 ```
 
-**Linux (x86_64 or arm64):** download the `.tar.gz` for your machine, then:
+**Linux (x86_64 or arm64):** download the `.AppImage` for your machine, then:
 
 ```sh
-tar xzf multibrowser-__VERSION__-linux-*.tar.gz
-cd multibrowser-__VERSION__-linux-*/ && ./install.sh
+chmod +x Multibrowser-__VERSION__-linux-*.AppImage
+./Multibrowser-__VERSION__-linux-*.AppImage
 ```
 
-That installs `multibrowser` to `~/.local/bin` and adds it to your app menu. `./install.sh --uninstall` removes it.
+To add it to your app menu with its icon, open it with an AppImage manager such as Gear Lever or AppImageLauncher.
 
 On first launch the app downloads the four browser engines (about 400 MB). `SHA256SUMS.txt` lists the
 checksums of the files below.

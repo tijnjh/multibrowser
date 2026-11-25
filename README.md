@@ -40,9 +40,9 @@ Download the latest build from the GitHub **Releases** page:
   The app is signed ad hoc but not notarized, so the first time you open it macOS says it can't verify it. Click
   **Open Anyway** in System Settings → Privacy & Security, or run
   `xattr -dr com.apple.quarantine /Applications/Multibrowser.app` once.
-- **Linux (x86_64, arm64):** unpack `multibrowser-<version>-linux-<arch>.tar.gz` and run `./install.sh` in it.
-  This puts `multibrowser` in `~/.local/bin` and adds a menu entry with the icon. `./install.sh --uninstall`
-  removes it.
+- **Linux (x86_64, arm64):** download `Multibrowser-<version>-linux-<arch>.AppImage`, make it executable
+  (`chmod +x Multibrowser-*.AppImage`) and run it. To get a menu entry with the icon, open it with an AppImage
+  manager such as Gear Lever or AppImageLauncher.
 
 ## Run from source
 
@@ -100,8 +100,8 @@ The tag starts `.github/workflows/release.yml`, which builds on GitHub's machine
 | Package | Built on |
 |---------|----------|
 | `Multibrowser-0.2.0-macos-arm64.dmg` | macOS 15, Apple Silicon |
-| `multibrowser-0.2.0-linux-x86_64.tar.gz` | Ubuntu 22.04, x86_64 |
-| `multibrowser-0.2.0-linux-aarch64.tar.gz` | Ubuntu 22.04, arm64 |
+| `Multibrowser-0.2.0-linux-x86_64.AppImage` | Ubuntu 22.04, x86_64 |
+| `Multibrowser-0.2.0-linux-aarch64.AppImage` | Ubuntu 22.04, arm64 |
 
 It then publishes a GitHub release with those files, a `SHA256SUMS.txt`, install instructions
 (`packaging/release-notes.md`) and notes generated from the commits since the previous release. That takes about
@@ -111,7 +111,8 @@ Run workflow): it builds the packages and attaches them to the run without publi
 Before releasing, you'll usually want the newest engines: run `scripts/update-engines.sh`, try the app and commit
 the new pins. Released apps keep their Playwright engines at the pinned versions; Ladybird stays at whatever
 version it first downloaded until you run `multibrowser --update`
-(`/Applications/Multibrowser.app/Contents/MacOS/multibrowser --update` on macOS).
+(`/Applications/Multibrowser.app/Contents/MacOS/multibrowser --update` on macOS, or
+`./Multibrowser-<version>-linux-<arch>.AppImage --update` on Linux).
 
 Other packaging files:
 
@@ -119,8 +120,8 @@ Other packaging files:
   package locally.
 - `assets/icon.svg` is the icon source. After editing it, run `scripts/make-icons.sh` (macOS, needs
   `brew install librsvg`) and commit the regenerated `.icns` and PNGs.
-- `packaging/macos/Info.plist` is the app bundle's metadata, and `packaging/linux/` holds the menu entry and
-  `install.sh`.
+- `packaging/macos/Info.plist` is the app bundle's metadata, and `packaging/linux/multibrowser.desktop` is the
+  AppImage's menu entry. The AppImage is built with appimagetool, pinned and checksummed in `scripts/package.sh`.
 
 ## Linux notes
 
