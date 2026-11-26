@@ -11,15 +11,46 @@ const pw = require(path.resolve(playwrightDir));
 
 let browser, context, page;
 let viewport = { width: 1024, height: 768 };
+let quitting = false;
 
 function adopt(p) {
   page = p;
   p.on('close', () => {
-    if (page === p) {
-      const rest = context.pages();
-      page = rest[rest.length - 1];
-    }
+    if (page !== p) return;
+    const rest = context.pages();
+    page = rest[rest.length - 1];
+    // The page closed itself (window.close()) and was the last one: keep a page to show.
+    if (!page && !quitting) context.newPage().catch(() => {});
   });
+  // A crashed page can't be screenshotted or navigated again. Exit, so the app restarts
+  // this engine with a fresh browser and reloads the page.
+  p.on('crash', () => {
+    process.stderr.write(`${engine}: page crashed\n`);
+    process.exit(1);
+  });
+}
+
+/** One readable error message. Playwright's messages can span many lines: drop the
+ *  ASCII box around them and the call log, and boil missing-dependency reports down to
+ *  the list of what's missing. */
+function errorText(e) {
+  const lines = String((e && e.message) || e)
+    .split('\n')
+    .map((l) => l.replace(/[║╔╗╚╝═]/g, '').trim().replace(/\s*\\$/, ''));
+  const callLog = lines.indexOf('Call log:');
+  const body = (callLog >= 0 ? lines.slice(0, callLog) : lines).filter(Boolean);
+  if (body.some((l) => l.includes('missing dependencies to run browsers'))) {
+    const libs = body.indexOf('Missing libraries:');
+    if (libs >= 0) return `Missing system libraries: ${body.slice(libs + 1).join(', ')}`;
+    const apt = body.findIndex((l) => l.includes('apt-get install'));
+    if (apt >= 0) {
+      const pkgs = [body[apt].replace(/^.*apt-get install\s*/, ''), ...body.slice(apt + 1)]
+        .filter((l) => l && !l.includes('Playwright Team'))
+        .join(' ');
+      return `Missing system packages. Install them with: sudo apt-get install ${pkgs}`;
+    }
+  }
+  return body.join('\n');
 }
 
 const handlers = {
@@ -75,6 +106,7 @@ const handlers = {
     return { url: page.url(), title, width: viewport.width, height: viewport.height };
   },
   async quit() {
+    quitting = true;
     await browser?.close().catch(() => {});
     setImmediate(() => process.exit(0));
   },
@@ -99,12 +131,13 @@ readline.createInterface({ input: process.stdin }).on('line', (line) => {
       if (!h) throw new Error(`unknown command ${req.cmd}`);
       reply({ id: req.id, ok: true, value: (await h(req)) ?? null });
     } catch (e) {
-      reply({ id: req.id, ok: false, error: String((e && e.message) || e).split('\n')[0] });
+      reply({ id: req.id, ok: false, error: errorText(e) });
     }
   });
 });
 
 process.stdin.on('end', async () => {
+  quitting = true;
   await browser?.close().catch(() => {});
   process.exit(0);
 });

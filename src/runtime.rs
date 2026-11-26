@@ -486,6 +486,36 @@ pub fn ladybird_env(webdriver: &Path) -> Vec<(String, String)> {
     ]
 }
 
+/// System libraries the unpacked Linux Ladybird needs but can't find. Ladybird comes from a
+/// .deb we don't install, so apt never pulled in its dependencies; without this check a
+/// missing library only shows up as WebDriver timing out while it waits for the browser.
+pub fn ladybird_missing_libs(webdriver: &Path) -> Vec<String> {
+    if cfg!(target_os = "macos") {
+        return Vec::new();
+    }
+    let Some(bin) = webdriver.parent() else { return Vec::new() };
+    let env = ladybird_env(webdriver);
+    // The browser and its helper processes (WebContent, RequestServer, …).
+    let mut files: Vec<PathBuf> = fs::read_dir(bin).into_iter().flatten().flatten().map(|e| e.path()).collect();
+    if let Some(prefix) = bin.parent() {
+        files.extend(walk(&prefix.join("libexec")));
+    }
+    let mut missing = Vec::new();
+    for f in files.iter().filter(|f| f.is_file()) {
+        let Ok(out) = Command::new("ldd").arg(f).envs(env.iter().cloned()).stderr(Stdio::null()).output() else {
+            return Vec::new(); // no ldd: can't tell
+        };
+        for line in String::from_utf8_lossy(&out.stdout).lines() {
+            if let Some((lib, _)) = line.trim().split_once(" => not found") {
+                missing.push(lib.to_string());
+            }
+        }
+    }
+    missing.sort();
+    missing.dedup();
+    missing
+}
+
 // ---------------------------------------------------------------------------------------
 // `multibrowser --update`
 

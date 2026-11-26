@@ -224,7 +224,7 @@ impl MultiBrowser {
     fn on_url_key(&mut self, ev: &KeyDownEvent, _: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
         let m = ks.modifiers;
-        if m.platform {
+        if is_shortcut(&m) {
             match ks.key.as_str() {
                 "a" => self.url_select_all = true,
                 "v" => {
@@ -317,7 +317,7 @@ impl MultiBrowser {
 
     fn on_root_key(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let ks = &ev.keystroke;
-        if !ks.modifiers.platform {
+        if !is_shortcut(&ks.modifiers) {
             return;
         }
         match ks.key.as_str() {
@@ -650,7 +650,89 @@ fn error_view(kind: EngineKind, err: &str) -> impl IntoElement {
         .p_6()
         .text_sm()
         .child(div().text_color(rgb(0xf38ba8)).child(format!("{} failed to start", kind.browser())))
-        .child(div().text_xs().text_color(rgb(0xa6adc8)).child(err.to_string()))
+        .child(div().w_full().text_center().text_xs().text_color(rgb(0xa6adc8)).child(err.to_string()))
+}
+
+/// Whether a key press uses the app's shortcut modifier: ⌘ on macOS, Ctrl elsewhere.
+/// (GPUI's `platform` modifier is the Super/Windows key on Linux.)
+fn is_shortcut(m: &gpui::Modifiers) -> bool {
+    if cfg!(target_os = "macos") { m.platform } else { m.control && !m.platform }
+}
+
+/// GPUI 0.2's Wayland client panics on compositors that lack the protocol versions it
+/// requires (for example WSLg's Weston, which only has `xdg_wm_base` v1). Check the
+/// compositor first, and if it falls short, run on X11 (XWayland) instead.
+#[cfg(target_os = "linux")]
+fn avoid_unsupported_wayland() {
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixStream;
+
+    let Some(display) = std::env::var_os("WAYLAND_DISPLAY").filter(|d| !d.is_empty()) else { return };
+    let path = match std::path::Path::new(&display) {
+        p if p.is_absolute() => p.to_path_buf(),
+        p => match std::env::var_os("XDG_RUNTIME_DIR") {
+            Some(dir) => std::path::Path::new(&dir).join(p),
+            None => return,
+        },
+    };
+    // Ask the registry for its globals: wl_display.get_registry(id 2), then
+    // wl_display.sync(id 3), whose `done` event marks the end of the list.
+    let globals = (|| -> std::io::Result<Vec<(String, u32)>> {
+        let mut sock = UnixStream::connect(&path)?;
+        sock.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let msg = |opcode: u32, new_id: u32| {
+            [1u32.to_ne_bytes(), (12 << 16 | opcode).to_ne_bytes(), new_id.to_ne_bytes()].concat()
+        };
+        sock.write_all(&[msg(1, 2), msg(0, 3)].concat())?;
+        let (mut buf, mut globals) = (Vec::new(), Vec::new());
+        let word = |b: &[u8], at: usize| u32::from_ne_bytes(b[at..at + 4].try_into().unwrap());
+        loop {
+            while buf.len() >= 8 {
+                let size = (word(&buf, 4) >> 16) as usize;
+                if size < 8 || buf.len() < size {
+                    break;
+                }
+                let (object, opcode) = (word(&buf, 0), word(&buf, 4) & 0xffff);
+                if object == 3 {
+                    return Ok(globals);
+                }
+                // wl_registry.global(name: uint, interface: string, version: uint)
+                if object == 2 && opcode == 0 && size >= 16 {
+                    let len = word(&buf, 12) as usize;
+                    let padded = (len + 3) & !3;
+                    if 16 + padded + 4 <= size && len > 0 {
+                        let iface = String::from_utf8_lossy(&buf[16..16 + len - 1]).into_owned();
+                        globals.push((iface, word(&buf, 16 + padded)));
+                    }
+                }
+                buf.drain(..size);
+            }
+            let mut chunk = [0u8; 4096];
+            let n = sock.read(&mut chunk)?;
+            if n == 0 {
+                return Ok(globals);
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+    })();
+    let Ok(globals) = globals else { return }; // let GPUI report connection problems
+    // What gpui 0.2's WaylandClient unwraps when it starts.
+    let required = [("wl_compositor", 3), ("wl_shm", 1), ("xdg_wm_base", 2)];
+    let Some((iface, min)) = required.into_iter().find(|&(iface, min)| {
+        !globals.iter().any(|(name, version)| name == iface && *version >= min)
+    }) else {
+        return;
+    };
+    let have = globals.iter().find(|(name, _)| name == iface).map(|(_, v)| format!("v{v}"));
+    let have = have.unwrap_or_else(|| "none".into());
+    if std::env::var_os("DISPLAY").is_some_and(|d| !d.is_empty()) {
+        eprintln!("Wayland compositor has {iface} {have}, but v{min}+ is needed; using X11 instead");
+        // SAFETY: called at the very start of main, before any other threads exist.
+        unsafe { std::env::remove_var("WAYLAND_DISPLAY") };
+    } else {
+        eprintln!("error: the Wayland compositor has {iface} {have}, but v{min}+ is needed, and no X11 display is available");
+        std::process::exit(1);
+    }
 }
 
 fn normalize_url(input: &str) -> String {
@@ -678,6 +760,8 @@ fn normalize_url(input: &str) -> String {
 
 fn main() {
     // `--update [--check]`: update the engine runtimes in the data folder, then exit.
+    #[cfg(target_os = "linux")]
+    avoid_unsupported_wayland();
     let args: Vec<String> = std::env::args().skip(1).collect();
     if args.first().is_some_and(|a| a == "--version" || a == "-V") {
         println!("multibrowser {}", env!("CARGO_PKG_VERSION"));
@@ -724,7 +808,10 @@ fn main() {
 
         // Shut the browsers down cleanly when the app exits.
         cx.on_app_quit(|_| async { engine::shutdown_all(Duration::from_secs(4)) }).detach();
-        cx.on_window_closed(|cx| cx.quit()).detach();
+        // Quit on the next turn of the event loop, not inside the close callback: GPUI's X11
+        // client runs that callback while it still has its own state borrowed, and quitting
+        // borrows it again ("RefCell already borrowed" panic).
+        cx.on_window_closed(|cx| cx.spawn(async |cx| cx.update(|cx| cx.quit())).detach()).detach();
         cx.activate(true);
     });
 }

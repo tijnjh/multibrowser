@@ -63,7 +63,7 @@ cargo run --release -- https://example.org     # URL is optional
   that frame scaled down, at about 50% for a 2×2 grid. On a Retina display that's one screenshot pixel per screen
   pixel, so it stays sharp. **Zoom −/+** makes that virtual window larger or smaller; the label shows the actual
   scale.
-- Shortcuts: ⌘L focus URL · ⌘R reload all · ⌘[ / ⌘] back/forward · ⌘+ / ⌘− / ⌘0 zoom · ⌘Q quit.
+- Shortcuts: ⌘L focus URL · ⌘R reload all · ⌘[ / ⌘] back/forward · ⌘+ / ⌘− / ⌘0 zoom · ⌘Q quit. On Linux, use Ctrl instead of ⌘.
 
 ## How it works
 
@@ -126,8 +126,14 @@ Other packaging files:
 ## Linux notes
 
 Playwright's browsers and Ladybird link against common desktop libraries: GTK, GStreamer, Vulkan, X11 and
-Wayland. A normal desktop install usually has them. On a minimal system, install the missing ones with
-`npx playwright install-deps` and the `Depends:` list of Ladybird's `.deb`.
+Wayland. A normal desktop install usually has them. If one is missing, the engine's pane lists
+the missing libraries. Install them with your package manager, or use `npx playwright install-deps` and the
+`Depends:` list of Ladybird's `.deb`.
+
+If an engine crashes, the app restarts it and reopens the page, up to three times a minute.
+
+GPUI needs a Wayland compositor with `xdg_wm_base` v2 or later. On older ones, such as WSLg's, the app runs on
+X11 (XWayland) instead.
 
 ## Debugging
 

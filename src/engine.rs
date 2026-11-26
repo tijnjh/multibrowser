@@ -257,6 +257,8 @@ trait Backend {
     fn call_js(&mut self, func: &str, args: Value) -> Result<Value>;
     fn screenshot_png(&mut self) -> Result<Vec<u8>>;
     fn meta(&mut self) -> Result<Meta>;
+    /// False once the browser's driver process (sidecar or WebDriver) has exited.
+    fn is_alive(&mut self) -> bool;
     fn shutdown(&mut self);
 }
 
@@ -379,6 +381,9 @@ impl Backend for PlaywrightBackend {
             viewport: Some((v["width"].as_f64().unwrap_or(0.0) as f32, v["height"].as_f64().unwrap_or(0.0) as f32)),
         })
     }
+    fn is_alive(&mut self) -> bool {
+        matches!(self.child.try_wait(), Ok(None))
+    }
     fn shutdown(&mut self) {
         let _ = self.call("quit", json!({}));
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -404,6 +409,10 @@ impl LadybirdBackend {
     fn start(kind: EngineKind, state: &Mutex<PaneState>) -> Result<(Self, String)> {
         let report = |m: String| set_status(kind, state, Status::Starting(m));
         let webdriver = runtime::ensure_ladybird(&report)?;
+        let missing = runtime::ladybird_missing_libs(&webdriver);
+        if !missing.is_empty() {
+            bail!("Missing system libraries: {}", missing.join(", "));
+        }
         report("Launching Ladybird…".into());
         let port = std::net::TcpListener::bind("127.0.0.1:0")?.local_addr()?.port();
         let driver = Command::new(&webdriver)
@@ -542,6 +551,9 @@ impl Backend for LadybirdBackend {
             viewport: self.inner_size(),
         })
     }
+    fn is_alive(&mut self) -> bool {
+        matches!(self.driver.try_wait(), Ok(None))
+    }
     fn shutdown(&mut self) {
         self.wd.delete_session();
         let _ = self.driver.kill();
@@ -602,7 +614,8 @@ const RESOLVE_JS: &str = r#"function (a, scroll) {
 // ---------------------------------------------------------------------------------------
 // Worker loop
 
-fn run(kind: EngineKind, rx: Receiver<Cmd>, state: &Arc<Mutex<PaneState>>) -> Result<()> {
+/// Start the engine's browser and publish its version.
+fn start_backend(kind: EngineKind, state: &Mutex<PaneState>) -> Result<Box<dyn Backend>> {
     let (backend, version): (Box<dyn Backend>, String) = match kind {
         EngineKind::Ladybird => {
             let (b, v) = LadybirdBackend::start(kind, state)?;
@@ -613,13 +626,20 @@ fn run(kind: EngineKind, rx: Receiver<Cmd>, state: &Arc<Mutex<PaneState>>) -> Re
             (Box::new(b), v)
         }
     };
-    {
-        let mut s = state.lock().unwrap();
-        s.engine_version = version;
-        s.version += 1;
-    }
+    let mut s = state.lock().unwrap();
+    s.engine_version = version;
+    s.version += 1;
+    Ok(backend)
+}
+
+/// How many crashes in `CRASH_WINDOW` an engine may have before we stop restarting it.
+const MAX_RESTARTS: usize = 3;
+const CRASH_WINDOW: Duration = Duration::from_secs(60);
+
+fn run(kind: EngineKind, rx: Receiver<Cmd>, state: &Arc<Mutex<PaneState>>) -> Result<()> {
+    let backend = start_backend(kind, state)?;
     set_status(kind, state, Status::Ready);
-    let mut w = Worker { kind, state, backend, last_png_hash: 0 };
+    let mut w = Worker { kind, state, backend, last_png_hash: 0, size: None, url: None, restarts: Vec::new() };
     let r = w.event_loop(rx);
     w.backend.shutdown();
     r
@@ -630,6 +650,13 @@ struct Worker<'a> {
     state: &'a Mutex<PaneState>,
     backend: Box<dyn Backend>,
     last_png_hash: u64,
+    /// Last requested viewport size, to restore after a restart.
+    size: Option<(u32, u32)>,
+    /// The page to reopen after a restart: the last URL the engine reported, or the last one
+    /// we navigated to if it crashed before reporting it.
+    url: Option<String>,
+    /// When the engine crashed recently.
+    restarts: Vec<Instant>,
 }
 
 impl Worker<'_> {
@@ -655,6 +682,11 @@ impl Worker<'_> {
             }
             if self.apply(cmds) {
                 return Ok(());
+            }
+            if !self.backend.is_alive() {
+                self.restart()?;
+                idle_frames = 0;
+                continue;
             }
 
             if last_meta.elapsed() > Duration::from_millis(500) {
@@ -701,7 +733,7 @@ impl Worker<'_> {
         for c in cmds {
             match c {
                 Cmd::Quit => return true,
-                Cmd::Resize(w, h) => resize = Some((w, h)),
+                    Cmd::Resize(w, h) => resize = Some((w, h)),
                 Cmd::Scroll { x, y, dx, dy } => {
                     let s = scroll.get_or_insert((x, y, 0.0, 0.0));
                     *s = (x, y, s.2 + dx, s.3 + dy);
@@ -724,6 +756,7 @@ impl Worker<'_> {
             }
         }
         if let Some((w, h)) = resize {
+            self.size = Some((w, h));
             if trace() {
                 eprintln!("[{}] resize {w}x{h}", self.kind.name());
             }
@@ -741,7 +774,10 @@ impl Worker<'_> {
                 set_status(self.kind, self.state, Status::Loading);
             }
             let r = match c {
-                Cmd::Navigate(url) => self.backend.navigate(&url),
+                Cmd::Navigate(url) => {
+                    self.url = Some(url.clone());
+                    self.backend.navigate(&url)
+                }
                 Cmd::Back => self.backend.back(),
                 Cmd::Forward => self.backend.forward(),
                 Cmd::Reload => self.backend.reload(),
@@ -799,8 +835,45 @@ impl Worker<'_> {
         }
     }
 
+    /// The browser's driver exited (it crashed, or the page crashed and the sidecar quit):
+    /// start a fresh browser, restore the viewport and reopen the page.
+    fn restart(&mut self) -> Result<()> {
+        let name = self.kind.browser();
+        self.restarts.retain(|t| t.elapsed() < CRASH_WINDOW);
+        if self.restarts.len() >= MAX_RESTARTS {
+            bail!("{name} crashed {MAX_RESTARTS} times in a minute; not restarting it again");
+        }
+        self.restarts.push(Instant::now());
+        eprintln!("[{}] {name} exited unexpectedly, restarting", self.kind.name());
+        self.backend.shutdown(); // reap the dead process
+        set_status(self.kind, self.state, Status::Starting(format!("{name} crashed, restarting…")));
+        self.backend = start_backend(self.kind, self.state)?;
+        self.last_png_hash = 0;
+        if let Some((w, h)) = self.size
+            && let Err(e) = self.backend.resize(w, h)
+        {
+            eprintln!("[{}] resize failed: {e:#}", self.kind.name());
+        }
+        let status = match self.url.clone() {
+            Some(url) => {
+                set_status(self.kind, self.state, Status::Loading);
+                match self.backend.navigate(&url) {
+                    Ok(()) => Status::Ready,
+                    Err(e) => Status::Error(format!("{e:#}")),
+                }
+            }
+            None => Status::Ready,
+        };
+        set_status(self.kind, self.state, status);
+        self.refresh_meta();
+        Ok(())
+    }
+
     fn refresh_meta(&mut self) {
         let Ok(meta) = self.backend.meta() else { return };
+        if !meta.url.is_empty() && meta.url != "about:blank" {
+            self.url = Some(meta.url.clone());
+        }
         let mut s = self.state.lock().unwrap();
         let mut changed = false;
         if s.url != meta.url {
